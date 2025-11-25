@@ -1,0 +1,142 @@
+﻿from PyQt5 import QtWidgets
+from app.db import SessionLocal
+from app.models import Department, Course, Classroom, ExamSlot, ExamAssignment
+import os, pandas as pd
+from datetime import datetime
+
+class SchedulerPage(QtWidgets.QWidget):
+    def __init__(self, current_user=None):
+        super().__init__()
+        self.current_user = current_user or {}
+        lay = QtWidgets.QVBoxLayout(self)
+
+        # Bölüm seçimi
+        row_dep = QtWidgets.QHBoxLayout()
+        row_dep.addWidget(QtWidgets.QLabel("Bolum:"))
+        self.dept = QtWidgets.QComboBox(); row_dep.addWidget(self.dept)
+        lay.addLayout(row_dep)
+        self._load_departments()
+        if (self.current_user.get("role") or "").lower() == "coordinator":
+            dep_id = self.current_user.get("department_id")
+            i = self.dept.findData(dep_id)
+            if i >= 0: self.dept.setCurrentIndex(i)
+            self.dept.setEnabled(False)
+
+        # Butonlar
+        row_btn = QtWidgets.QHBoxLayout()
+        self.btn_build  = QtWidgets.QPushButton("Plani Olustur (MVP)")
+        self.btn_clear  = QtWidgets.QPushButton("Plani Temizle")
+        self.btn_export = QtWidgets.QPushButton("Excel'e Aktar")
+        row_btn.addWidget(self.btn_build); row_btn.addWidget(self.btn_clear); row_btn.addWidget(self.btn_export)
+        lay.addLayout(row_btn)
+        self.btn_build.clicked.connect(self.build_plan)
+        self.btn_clear.clicked.connect(self.clear_plan)
+        self.btn_export.clicked.connect(self.export_excel)
+
+        # Tablo
+        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["course_id","Ders","Derslik","Slot","Saat"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table)
+
+        self.load_plan()
+
+    def _load_departments(self):
+        self.dept.clear()
+        with SessionLocal() as db:
+            for d in db.query(Department).order_by(Department.id):
+                self.dept.addItem(d.name, d.id)
+
+    def _dep_id(self): return self.dept.currentData()
+
+    def clear_plan(self):
+        dep = self._dep_id()
+        with SessionLocal() as db:
+            db.query(ExamAssignment).filter_by(department_id=dep).delete()
+            db.commit()
+        self.load_plan()
+        QtWidgets.QMessageBox.information(self, "OK", "Plan temizlendi.")
+
+    def load_plan(self):
+        self.table.setRowCount(0)
+        dep = self._dep_id()
+        with SessionLocal() as db:
+            rows = (
+                db.query(ExamAssignment, Course, Classroom, ExamSlot)
+                .join(Course, Course.id==ExamAssignment.course_id)
+                .join(Classroom, Classroom.id==ExamAssignment.classroom_id)
+                .join(ExamSlot, ExamSlot.id==ExamAssignment.slot_id)
+                .filter(ExamAssignment.department_id==dep)
+                .order_by(Course.code)
+                .all()
+            )
+            for r,(a,course,room,slot) in enumerate(rows):
+                self.table.insertRow(r)
+                vals = [
+                    course.id,
+                    f"{course.code} - {course.name}",
+                    f"{room.code} ({room.name})",
+                    slot.name,
+                    f"{slot.starts_at.strftime("%d.%m %H:%M")} - {slot.ends_at.strftime("%H:%M")}",
+                ]
+                for c,v in enumerate(vals):
+                    self.table.setItem(r,c,QtWidgets.QTableWidgetItem(str(v)))
+
+    def build_plan(self):
+        dep = self._dep_id()
+        with SessionLocal() as db:
+            courses = db.query(Course).filter_by(department_id=dep).order_by(Course.code).all()
+            rooms   = db.query(Classroom).filter_by(department_id=dep).order_by(Classroom.capacity.desc()).all()
+            slots   = db.query(ExamSlot).order_by(ExamSlot.starts_at).all()
+            if not courses:
+                QtWidgets.QMessageBox.warning(self,"Eksik","Bu bolumde ders yok."); return
+            if not rooms:
+                QtWidgets.QMessageBox.warning(self,"Eksik","Bu bolumde derslik yok."); return
+            if not slots:
+                QtWidgets.QMessageBox.warning(self,"Eksik","Once sinav slotlarini seed etmelisin."); return
+
+            db.query(ExamAssignment).filter_by(department_id=dep).delete()
+            cells = [(s,r) for s in slots for r in rooms]
+            count = min(len(courses), len(cells))
+            if len(courses) > len(cells):
+                QtWidgets.QMessageBox.warning(self,"Uyari",
+                    f"Ders sayisi ({len(courses)}) > Slot*Oda ({len(cells)}). Ilk {count} ders yerlestirilecek.")
+            for i in range(count):
+                course = courses[i]; slot, room = cells[i]
+                db.add(ExamAssignment(department_id=dep, course_id=course.id,
+                                      classroom_id=room.id, slot_id=slot.id))
+            db.commit()
+        self.load_plan()
+        QtWidgets.QMessageBox.information(self,"OK","MVP plan olusturuldu.")
+
+    def export_excel(self):
+        dep = self._dep_id()
+        with SessionLocal() as db:
+            rows = (
+                db.query(ExamAssignment, Course, Classroom, ExamSlot, Department)
+                .join(Course, Course.id==ExamAssignment.course_id)
+                .join(Classroom, Classroom.id==ExamAssignment.classroom_id)
+                .join(ExamSlot, ExamSlot.id==ExamAssignment.slot_id)
+                .join(Department, Department.id==ExamAssignment.department_id)
+                .filter(ExamAssignment.department_id==dep)
+                .order_by(ExamSlot.starts_at, Classroom.code, Course.code)
+                .all()
+            )
+            data = []
+            for a,course,room,slot,depobj in rows:
+                data.append({
+                    "Bölüm": depobj.name,
+                    "Ders Kodu": course.code,
+                    "Ders Adı": course.name,
+                    "Derslik": f"{room.code} ({room.name})",
+                    "Slot": slot.name,
+                    "Başlangıç": slot.starts_at.strftime("%Y-%m-%d %H:%M"),
+                    "Bitiş": slot.ends_at.strftime("%Y-%m-%d %H:%M"),
+                })
+        if not data:
+            QtWidgets.QMessageBox.information(self,"Boş","Önce bir plan oluştur.")
+            return
+        os.makedirs("exports", exist_ok=True)
+        fname = f"exports/plan_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx"
+        pd.DataFrame(data).to_excel(fname, index=False)
+        QtWidgets.QMessageBox.information(self,"OK",f"Excel kaydedildi:\\n{fname}")

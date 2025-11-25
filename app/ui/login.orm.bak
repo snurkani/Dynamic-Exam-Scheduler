@@ -1,0 +1,42 @@
+﻿from PyQt5 import QtWidgets
+from app.db import SessionLocal
+from app.models import User
+
+class LoginWindow(QtWidgets.QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Giris")
+        layout = QtWidgets.QFormLayout(self)
+
+        self.email = QtWidgets.QLineEdit()
+        self.pw = QtWidgets.QLineEdit()
+        self.pw.setEchoMode(QtWidgets.QLineEdit.Password)
+
+        self.btn = QtWidgets.QPushButton("Giris Yap")
+        self.msg = QtWidgets.QLabel()
+
+        layout.addRow("E-posta", self.email)
+        layout.addRow("Sifre", self.pw)
+        layout.addRow(self.btn)
+        layout.addRow(self.msg)
+
+        self.btn.clicked.connect(self.try_login)
+
+        # kritik: ana pencereye aktaracagimiz oturum bilgisi
+        self.current_user = None  # dict: {id, email, role, department_id}
+
+    def try_login(self):
+        email = self.email.text().strip()
+        password = self.pw.text()
+        with SessionLocal() as db:
+            user = db.query(User).filter_by(email=email).first()
+            if user and user.verify_password(password):
+                self.current_user = {
+                    "id": user.id,
+                    "email": user.email,
+                    "role": user.role,
+                    "department_id": user.department_id,
+                }
+                self.accept()
+            else:
+                self.msg.setText("Hatali giris")
